@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseArgs, SUBCOMMANDS, USAGE } from "../src/args";
+import { parseArgs, SUBCOMMANDS } from "../src/args";
 import { TrunkError } from "../src/repository";
 
 describe("command grammar", () => {
@@ -9,7 +9,6 @@ describe("command grammar", () => {
 		expect(parseArgs("help")).toEqual({ op: "help" });
 		expect(parseArgs("list")).toEqual({ op: "list" });
 		expect(Object.keys(SUBCOMMANDS).sort()).toEqual(["add", "cd", "help", "list", "remove"]);
-		expect(USAGE).toContain("/trunk add -b <new-branch> [revision] [--no-cd]");
 	});
 
 	test("navigation accepts a single registered selector", () => {

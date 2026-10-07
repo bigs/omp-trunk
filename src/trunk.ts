@@ -128,7 +128,7 @@ export default function trunk(pi: ExtensionAPI): void {
 		if (command.op === "add") {
 			// Refuse an unrepresentable destination before creating a checkout.
 			nativeMovePath(path.join(repo.baseDir, command.branch));
-			target = await addWorktree(repo, command);
+			target = await addWorktree(repo, command, message => ctx.ui.notify(message, "info"));
 			ctx.ui.notify(
 				`Added ${describeWorktree(target)}. Requesting native /move; the worktree remains if relocation is refused or fails.`,
 				"info",
@@ -177,7 +177,7 @@ export default function trunk(pi: ExtensionAPI): void {
 				ctx.ui.notify(listWorktrees(repo), "info");
 				return;
 			case "add": {
-				const worktree = await addWorktree(repo, command);
+				const worktree = await addWorktree(repo, command, message => ctx.ui.notify(message, "info"));
 				ctx.ui.notify(`Added ${describeWorktree(worktree)}. Current directory unchanged (--no-cd).`, "info");
 				return;
 			}

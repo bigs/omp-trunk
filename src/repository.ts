@@ -1,5 +1,6 @@
 import { lstatSync, readlinkSync, realpathSync, statSync, type Stats } from "node:fs";
 import * as path from "node:path";
+import { readPostCreateHooks, runPostCreateHooks, type PostCreateHook } from "./hooks.ts";
 
 export class TrunkError extends Error {
 	constructor(message: string) {
@@ -152,6 +153,7 @@ function checkDestination(repo: Repository, branch: string): string {
 export async function addWorktree(
 	repo: Repository,
 	options: { branch: string; createBranch: boolean; revision?: string },
+	reportHook?: (message: string) => void,
 ): Promise<Worktree> {
 	const fresh = await discoverRepository(repo.cwd);
 	const { branch, createBranch, revision } = options;
@@ -184,9 +186,24 @@ export async function addWorktree(
 		}
 		args = ["worktree", "add", "--track", "-b", branch, "--", destination, matches[0]!];
 	}
+	let hooks: PostCreateHook[];
+	try {
+		hooks = readPostCreateHooks(fresh.primaryPath);
+	} catch (error) {
+		throw new TrunkError(`Invalid worktree hook configuration: ${error instanceof Error ? error.message : String(error)}`);
+	}
 	await git(fresh.cwd, args);
 	const result = (await discoverRepository(fresh.cwd)).worktrees.find(worktree => worktree.path === destination && worktree.branch === branch);
 	if (!result) throw new TrunkError("Git created the worktree, but its path and branch could not be confirmed. Inspect /trunk list.");
+	try {
+		await runPostCreateHooks(hooks, fresh.primaryPath, result.path, reportHook);
+	} catch (error) {
+		throw new TrunkError(
+			`Worktree created at ${JSON.stringify(result.path)}, but post_create setup failed: ` +
+				`${error instanceof Error ? error.message : String(error)}\n` +
+				"The worktree and branch were kept; navigation was not requested. Fix setup in that checkout, then use /trunk cd.",
+		);
+	}
 	return result;
 }
 

@@ -16,7 +16,8 @@ export const USAGE = `Usage:
   /trunk remove <branch|path>
   /trunk help
 
-Add moves this conversation by default; --no-cd only creates the worktree.
+Add runs .wtp.yml/.wtp.yaml post_create hooks by default, then moves this
+conversation. --no-cd still runs hooks but leaves the current directory unchanged.
 New branches start at the current checkout's HEAD unless a revision is given.
 Worktrees live at <primary-repo>.worktrees/<branch>, including branch slashes.
 Cd with no target, or @, selects the primary checkout. Paths must name a

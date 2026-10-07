@@ -252,6 +252,223 @@ describe("adding standard linked worktrees", () => {
 	});
 });
 
+describe("WTP post-create hooks", () => {
+	test(".wtp.yml runs ordered copy, symlink, and command hooks with source contents and modes", async () => {
+		const assets = path.join(primary, "local assets");
+		fs.mkdirSync(path.join(assets, "nested"), { recursive: true });
+		fs.writeFileSync(path.join(assets, "nested", "run.sh"), "#!/bin/sh\nprintf setup\n", { mode: 0o751 });
+		fs.chmodSync(path.join(assets, "nested", "run.sh"), 0o751);
+		fs.symlinkSync("nested/run.sh", path.join(assets, "alias"));
+		fs.writeFileSync(path.join(primary, ".wtp.yml"), `
+defaults:
+  base_dir: ignored-layout
+hooks:
+  post_create:
+    - type: copy
+      from: local assets
+    - type: copy
+      from: local assets/nested/run.sh
+      to: file.txt
+    - type: symlink
+      from: local assets/nested/run.sh
+      to: linked-script
+    - type: command
+      command: 'test -L linked-script && cmp linked-script file.txt && ./file.txt > setup-result'
+`);
+		const linked = await addWorktree(await discoverRepository(primary), { branch: "hook/mixed", createBranch: true });
+		expect(linked.path).toBe(path.join(`${primary}.worktrees`, "hook/mixed"));
+		expect(fs.readFileSync(path.join(linked.path, "setup-result"), "utf8")).toBe("setup");
+		expect(fs.readFileSync(path.join(linked.path, "local assets", "nested", "run.sh"), "utf8")).toBe("#!/bin/sh\nprintf setup\n");
+		expect(fs.statSync(path.join(linked.path, "local assets", "nested", "run.sh")).mode & 0o777).toBe(0o751);
+		expect(fs.statSync(path.join(linked.path, "file.txt")).mode & 0o777).toBe(0o751);
+		expect(fs.lstatSync(path.join(linked.path, "local assets", "alias")).isSymbolicLink()).toBe(false);
+		expect(fs.readFileSync(path.join(linked.path, "local assets", "alias"), "utf8")).toBe("#!/bin/sh\nprintf setup\n");
+		expect(fs.readlinkSync(path.join(linked.path, "linked-script"))).toBe(path.join(assets, "nested", "run.sh"));
+	});
+
+	test(".wtp.yaml is anchored to the primary checkout even from a linked subdirectory", async () => {
+		const secondary = await addWorktree(await discoverRepository(primary), { branch: "hook-caller", createBranch: true, revision: first });
+		const nested = path.join(secondary.path, "nested");
+		fs.mkdirSync(nested);
+		for (const cwd of [secondary.path, nested]) {
+			fs.writeFileSync(path.join(cwd, ".wtp.yml"), "hooks: { post_create: [{ type: unknown }] }\n");
+			fs.writeFileSync(path.join(cwd, ".wtp.yaml"), "not: [valid\n");
+		}
+		fs.mkdirSync(path.join(primary, "config"));
+		fs.writeFileSync(path.join(primary, "config", "private"), "primary only\n");
+		fs.writeFileSync(path.join(primary, ".wtp.yaml"), `
+hooks:
+  post_create:
+    - type: copy
+      from: config
+      to: setup
+    - type: command
+      work_dir: setup
+      env:
+        HOOK_VALUE: "value with spaces"
+        GIT_WTP_REPO_ROOT: wrong-root
+        GIT_WTP_WORKTREE_PATH: wrong-worktree
+      command: |
+        printf '%s\\n' "$HOOK_VALUE" "$GIT_WTP_REPO_ROOT" "$GIT_WTP_WORKTREE_PATH" > metadata
+        pwd -P > cwd
+        cat private > copied
+`);
+		const linked = await addWorktree(await discoverRepository(nested), { branch: "hook-primary", createBranch: true });
+		expect(linked.head).toBe(first);
+		expect(fs.readFileSync(path.join(linked.path, "setup", "metadata"), "utf8")).toBe(`value with spaces\n${primary}\n${linked.path}\n`);
+		expect(fs.readFileSync(path.join(linked.path, "setup", "cwd"), "utf8")).toBe(`${linked.path}/setup\n`);
+		expect(fs.readFileSync(path.join(linked.path, "setup", "copied"), "utf8")).toBe("primary only\n");
+	});
+
+	test("absolute paths work and home-like path fields remain literal", async () => {
+		const external = path.join(dir, "external source");
+		fs.writeFileSync(external, "external\n");
+		for (const name of ["~", "$HOME"]) {
+			fs.mkdirSync(path.join(primary, name));
+			fs.writeFileSync(path.join(primary, name, "secret"), `${name}\n`);
+		}
+		const destination = path.join(dir, "external copy");
+		fs.writeFileSync(path.join(primary, ".wtp.yml"), JSON.stringify({
+			hooks: { post_create: [
+				{ type: "copy", from: external, to: destination },
+				{ type: "copy", from: "~/secret" },
+				{ type: "copy", from: "$HOME/secret" },
+				{ type: "symlink", from: external, to: "external-link" },
+			] },
+		}));
+		const linked = await addWorktree(await discoverRepository(primary), { branch: "hook-paths", createBranch: true });
+		expect(fs.readFileSync(destination, "utf8")).toBe("external\n");
+		for (const name of ["~", "$HOME"]) {
+			expect(fs.readFileSync(path.join(linked.path, name, "secret"), "utf8")).toBe(`${name}\n`);
+		}
+		expect(fs.readlinkSync(path.join(linked.path, "external-link"))).toBe(external);
+	});
+
+	test.each([
+		["invalid YAML", "hooks: [\n"],
+		["scalar root", "42\n"],
+		["array root", "[]\n"],
+		["scalar hooks", "hooks: true\n"],
+		["non-list hooks", "hooks: { post_create: {} }\n"],
+		["null entry", "hooks: { post_create: [null] }\n"],
+		["unknown type", "hooks: { post_create: [{ type: unknown }] }\n"],
+		["missing command", "hooks: { post_create: [{ type: command }] }\n"],
+		["non-string command", "hooks: { post_create: [{ type: command, command: 42 }] }\n"],
+		["invalid env", "hooks: { post_create: [{ type: command, command: 'true', env: { X: 42 } }] }\n"],
+		["invalid work_dir", "hooks: { post_create: [{ type: command, command: 'true', work_dir: [] }] }\n"],
+		["command with from", "hooks: { post_create: [{ type: command, command: 'true', from: file.txt }] }\n"],
+		["command with to", "hooks: { post_create: [{ type: command, command: 'true', to: file.txt }] }\n"],
+		["copy without from", "hooks: { post_create: [{ type: copy, to: file.txt }] }\n"],
+		["absolute copy without to", "hooks: { post_create: [{ type: copy, from: /absolute-source }] }\n"],
+		["copy with command", "hooks: { post_create: [{ type: copy, from: file.txt, command: 'true' }] }\n"],
+		["symlink without to", "hooks: { post_create: [{ type: symlink, from: file.txt }] }\n"],
+		["symlink with command", "hooks: { post_create: [{ type: symlink, from: file.txt, to: link, command: 'true' }] }\n"],
+		["source escape", "hooks: { post_create: [{ type: copy, from: ../outside, to: inside }] }\n"],
+		["destination escape", "hooks: { post_create: [{ type: copy, from: file.txt, to: ../outside }] }\n"],
+	])("%s fails before creating any worktree or branch", async (_name, config) => {
+		fs.writeFileSync(path.join(primary, ".wtp.yml"), config);
+		const repo = await discoverRepository(primary);
+		await expect(addWorktree(repo, { branch: "invalid-hooks", createBranch: true })).rejects.toThrow(TrunkError);
+		expect(await git(primary, "for-each-ref", "--format=%(refname)", "refs/heads/invalid-hooks")).toBe("");
+		expect(fs.existsSync(path.join(repo.baseDir, "invalid-hooks"))).toBe(false);
+		expect((await discoverRepository(primary)).worktrees.map(worktree => worktree.path)).toEqual([primary]);
+	});
+
+	test("both config filenames are ambiguous even when empty", async () => {
+		fs.writeFileSync(path.join(primary, ".wtp.yml"), "");
+		fs.writeFileSync(path.join(primary, ".wtp.yaml"), "");
+		const repo = await discoverRepository(primary);
+		await expect(addWorktree(repo, { branch: "ambiguous-hooks", createBranch: true })).rejects.toThrow(TrunkError);
+		expect(await git(primary, "for-each-ref", "--format=%(refname)", "refs/heads/ambiguous-hooks")).toBe("");
+		expect(fs.existsSync(path.join(repo.baseDir, "ambiguous-hooks"))).toBe(false);
+		expect((await discoverRepository(primary)).worktrees.map(worktree => worktree.path)).toEqual([primary]);
+	});
+
+	test.each(["", "hooks: null\n", "hooks: {}\n", "hooks: { post_create: null }\n"])("empty hook configuration %j is a no-op", async config => {
+		fs.writeFileSync(path.join(primary, ".wtp.yml"), config);
+		const linked = await addWorktree(await discoverRepository(primary), { branch: "empty-hooks", createBranch: true });
+		expect(fs.readFileSync(path.join(linked.path, "file.txt"), "utf8")).toBe("latest\n");
+		expect(await git(linked.path, "status", "--porcelain")).toBe("");
+	});
+
+	test("failed commands preserve the worktree and branch, report both streams, and stop later hooks", async () => {
+		fs.writeFileSync(path.join(primary, ".wtp.yml"), `
+hooks:
+  post_create:
+    - type: command
+      command: printf before > before
+    - type: command
+      command: 'printf command-output; printf command-error >&2; exit 23'
+    - type: command
+      command: touch should-not-exist
+`);
+		const messages: string[] = [];
+		const repo = await discoverRepository(primary);
+		await expect(addWorktree(repo, { branch: "failed-command", createBranch: true }, message => messages.push(message))).rejects.toThrow(/23/u);
+		const linked = (await discoverRepository(primary)).worktrees.find(worktree => worktree.branch === "failed-command");
+		expect(linked?.path).toBe(path.join(repo.baseDir, "failed-command"));
+		expect(await git(primary, "rev-parse", "refs/heads/failed-command")).toBe(latest);
+		expect(fs.readFileSync(path.join(linked!.path, "before"), "utf8")).toBe("before");
+		expect(fs.existsSync(path.join(linked!.path, "should-not-exist"))).toBe(false);
+		expect(messages.join("\n")).toContain("command-output");
+		expect(messages.join("\n")).toContain("command-error");
+	});
+
+	test.each(["copy", "symlink"])("a missing %s source stops later hooks without undoing creation", async type => {
+		fs.writeFileSync(path.join(primary, ".wtp.yml"), JSON.stringify({
+			hooks: { post_create: [
+				{ type, from: "missing-source", to: "missing-target" },
+				{ type: "command", command: "touch should-not-exist" },
+			] },
+		}));
+		const repo = await discoverRepository(primary);
+		await expect(addWorktree(repo, { branch: "missing-hook-source", createBranch: true })).rejects.toThrow(TrunkError);
+		const linked = (await discoverRepository(primary)).worktrees.find(worktree => worktree.branch === "missing-hook-source");
+		expect(linked?.path).toBe(path.join(repo.baseDir, "missing-hook-source"));
+		expect(await git(primary, "rev-parse", "refs/heads/missing-hook-source")).toBe(latest);
+		expect(fs.existsSync(path.join(linked!.path, "missing-target"))).toBe(false);
+		expect(fs.existsSync(path.join(linked!.path, "should-not-exist"))).toBe(false);
+	});
+
+	test("symlink hooks refuse an existing dangling destination without replacing it", async () => {
+		fs.writeFileSync(path.join(primary, ".wtp.yml"), JSON.stringify({
+			hooks: { post_create: [
+				{ type: "command", command: "ln -s missing-target collision" },
+				{ type: "symlink", from: "file.txt", to: "collision" },
+				{ type: "command", command: "touch should-not-exist" },
+			] },
+		}));
+		const repo = await discoverRepository(primary);
+		await expect(addWorktree(repo, { branch: "hook-collision", createBranch: true })).rejects.toThrow(TrunkError);
+		const linked = (await discoverRepository(primary)).worktrees.find(worktree => worktree.branch === "hook-collision");
+		expect(linked?.path).toBe(path.join(repo.baseDir, "hook-collision"));
+		expect(fs.readlinkSync(path.join(linked!.path, "collision"))).toBe("missing-target");
+		expect(fs.existsSync(path.join(linked!.path, "should-not-exist"))).toBe(false);
+		expect(await git(primary, "rev-parse", "refs/heads/hook-collision")).toBe(latest);
+	});
+
+	test("copy hooks reject the same inode without truncating the source", async () => {
+		const source = path.join(primary, "private-source");
+		const alias = path.join(dir, "hardlink-alias");
+		fs.writeFileSync(source, "must survive\n");
+		fs.linkSync(source, alias);
+		fs.writeFileSync(path.join(primary, ".wtp.yml"), JSON.stringify({
+			hooks: { post_create: [
+				{ type: "copy", from: source, to: alias },
+				{ type: "command", command: "touch should-not-exist" },
+			] },
+		}));
+		const repo = await discoverRepository(primary);
+		await expect(addWorktree(repo, { branch: "same-inode", createBranch: true })).rejects.toThrow(TrunkError);
+		expect(fs.readFileSync(source, "utf8")).toBe("must survive\n");
+		expect(fs.readFileSync(alias, "utf8")).toBe("must survive\n");
+		expect(await git(primary, "rev-parse", "refs/heads/same-inode")).toBe(latest);
+		const linked = (await discoverRepository(primary)).worktrees.find(worktree => worktree.branch === "same-inode");
+		expect(linked?.path).toBe(path.join(repo.baseDir, "same-inode"));
+		expect(fs.existsSync(path.join(linked!.path, "should-not-exist"))).toBe(false);
+	});
+});
+
 describe("destination containment", () => {
 	test("a symlinked base is refused without modifying the destination or branch refs", async () => {
 		const repo = await discoverRepository(primary);
