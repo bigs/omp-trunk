@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { addWorktree, discoverRepository, removeWorktree, resolveWorktree, TrunkError } from "../src/repository";
+import { parseArgs } from "../src/args";
+import { completeTrunkArguments } from "../src/completions";
 
 let dir: string;
 let primary: string;
@@ -466,6 +468,82 @@ hooks:
 		const linked = (await discoverRepository(primary)).worktrees.find(worktree => worktree.branch === "same-inode");
 		expect(linked?.path).toBe(path.join(repo.baseDir, "same-inode"));
 		expect(fs.existsSync(path.join(linked!.path, "should-not-exist"))).toBe(false);
+	});
+});
+
+describe("worktree target completion", () => {
+	test("cd suggests registered branches and the primary alias, with live changes and exact matches suppressed", async () => {
+		await git(primary, "branch", "not-checked-out");
+		const linked = await addWorktree(await discoverRepository(primary), { branch: "feature/topic", createBranch: true });
+		expect(completeTrunkArguments("cd ", primary)?.map(item => item.value)).toEqual(["cd @", "cd feature/topic"]);
+		expect(completeTrunkArguments("cd fea", primary)?.map(item => item.value)).toEqual(["cd feature/topic"]);
+		expect(completeTrunkArguments("cd feature/topic", primary)).toEqual([]);
+		expect(completeTrunkArguments("cd @", primary)).toEqual([]);
+		expect(completeTrunkArguments("cd main", primary)).toEqual([]);
+		await removeWorktree(await discoverRepository(primary), linked);
+		expect(completeTrunkArguments("cd fea", primary)).toEqual([]);
+		expect(completeTrunkArguments("c", dir)?.map(item => item.value)).toEqual(["cd "]);
+		expect(completeTrunkArguments("cd ", dir)).toBeNull();
+	});
+
+	test("remove excludes primary, current, locked, and unavailable worktrees", async () => {
+		const current = await addWorktree(await discoverRepository(primary), { branch: "current", createBranch: true });
+		await addWorktree(await discoverRepository(primary), { branch: "removable", createBranch: true });
+		const locked = await addWorktree(await discoverRepository(primary), { branch: "locked", createBranch: true });
+		await git(primary, "worktree", "lock", locked.path);
+		const missing = await addWorktree(await discoverRepository(primary), { branch: "missing", createBranch: true });
+		fs.renameSync(missing.path, path.join(dir, "moved"));
+		const nested = path.join(current.path, "nested");
+		fs.mkdirSync(nested);
+		expect(completeTrunkArguments("remove ", nested)?.map(item => item.value)).toEqual(["remove removable"]);
+		expect(completeTrunkArguments("remove rem", nested)?.map(item => item.value)).toEqual(["remove removable"]);
+		expect(completeTrunkArguments("remove removable", nested)).toEqual([]);
+		expect(completeTrunkArguments("cd ", nested)?.map(item => item.value)).toEqual(["cd @", "cd current", "cd locked", "cd removable"]);
+	});
+
+	test("detached paths with spaces, quotes, and backslashes complete to executable selectors", async () => {
+		const detached = path.join(dir, `detached \"quote\" 'single' \\backslash`);
+		await git(primary, "worktree", "add", "--detach", detached, first);
+		for (const prefix of ["cd ", "remove ", `cd \"${dir}/detached `, `cd '${dir}/detached `, `cd ${dir}/detached\\ `]) {
+			const items = completeTrunkArguments(prefix, primary) ?? [];
+			const item = items.find(candidate => candidate.label === detached);
+			expect(item).toBeDefined();
+			const command = parseArgs(item!.value);
+			expect(command.op === "cd" || command.op === "remove").toBe(true);
+			if (command.op !== "cd" && command.op !== "remove") throw new Error("Expected a worktree selector.");
+			expect(resolveWorktree(await discoverRepository(primary), command.target).path).toBe(detached);
+			expect(completeTrunkArguments(item!.value, primary)).toEqual([]);
+		}
+	});
+
+	test("branch/path collisions complete to unambiguous absolute paths", async () => {
+		const external = path.join(dir, "external");
+		const conventional = `${primary}.worktrees/collision`;
+		await git(primary, "worktree", "add", "-b", "collision", external, first);
+		await git(primary, "worktree", "add", "-b", "other", conventional, latest);
+		const item = completeTrunkArguments("cd coll", primary)?.[0];
+		expect(item).toBeDefined();
+		const command = parseArgs(item!.value);
+		expect(command).toEqual({ op: "cd", target: external });
+		if (command.op !== "cd") throw new Error("Expected cd.");
+		expect(resolveWorktree(await discoverRepository(primary), command.target).path).toBe(external);
+	});
+
+	test("quoted branch prefixes use the same escaping rules as command submission", async () => {
+		const branch = 'feature/a\"quote';
+		const linked = await addWorktree(await discoverRepository(primary), { branch, createBranch: true });
+		const item = completeTrunkArguments('cd \"feature/a', primary)?.[0];
+		expect(item).toBeDefined();
+		const command = parseArgs(item!.value);
+		expect(command).toEqual({ op: "cd", target: branch });
+		if (command.op !== "cd") throw new Error("Expected cd.");
+		expect(resolveWorktree(await discoverRepository(primary), command.target).path).toBe(linked.path);
+		expect(completeTrunkArguments(item!.value, primary)).toEqual([]);
+		expect(completeTrunkArguments(`cd '${branch}`, primary)?.map(candidate => parseArgs(candidate.value)))
+			.toEqual([{ op: "cd", target: branch }]);
+		for (const prefix of ["cd feature/ extra", "cd feature/ ", "remove feature/ extra", "add feature/", "list ", "cd bad\0"]) {
+			expect(completeTrunkArguments(prefix, primary)).toBeNull();
+		}
 	});
 });
 

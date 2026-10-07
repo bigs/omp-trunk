@@ -115,16 +115,31 @@ function parseWorktrees(output: string, cwd: string): Worktree[] {
 	return worktrees;
 }
 
-export async function discoverRepository(cwd: string): Promise<Repository> {
-	if (!cwd || cwd.includes("\0")) throw new TrunkError("A valid repository directory is required.");
-	const canonicalCwd = canonicalPath(cwd);
-	const worktrees = parseWorktrees(await git(canonicalCwd, ["worktree", "list", "--porcelain", "-z"]), canonicalCwd);
+function repositoryFromOutput(cwd: string, output: string): Repository {
+	const worktrees = parseWorktrees(output, cwd);
 	const primary = worktrees[0];
 	if (!primary) throw new TrunkError("Git did not report a primary worktree.");
 	if (primary.bare) {
 		throw new TrunkError("/trunk does not support a bare primary repository. Use a non-bare clone with a primary checkout.");
 	}
-	return { primaryPath: primary.path, baseDir: `${primary.path}.worktrees`, cwd: canonicalCwd, worktrees };
+	return { primaryPath: primary.path, baseDir: `${primary.path}.worktrees`, cwd, worktrees };
+}
+
+export async function discoverRepository(cwd: string): Promise<Repository> {
+	if (!cwd || cwd.includes("\0")) throw new TrunkError("A valid repository directory is required.");
+	const canonicalCwd = canonicalPath(cwd);
+	return repositoryFromOutput(canonicalCwd, await git(canonicalCwd, ["worktree", "list", "--porcelain", "-z"]));
+}
+
+// OMP's completion callback is synchronous. Read live Git state with a bounded wait.
+export function discoverRepositoryForCompletion(cwd: string): Repository {
+	if (!cwd || cwd.includes("\0")) throw new TrunkError("A valid repository directory is required.");
+	const canonicalCwd = canonicalPath(cwd);
+	const result = Bun.spawnSync(["git", "-C", canonicalCwd, "worktree", "list", "--porcelain", "-z"], {
+		stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 1000,
+	});
+	if (result.exitCode !== 0) throw new TrunkError("Worktree completion is unavailable.");
+	return repositoryFromOutput(canonicalCwd, result.stdout.toString());
 }
 
 function checkDestination(repo: Repository, branch: string): string {

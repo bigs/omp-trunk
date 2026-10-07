@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext, InputEventResult } from "@oh-my-pi/pi-coding-agent";
-import { parseArgs, SUBCOMMANDS, USAGE, type TrunkCommand } from "./args.ts";
+import { parseArgs, USAGE, type TrunkCommand } from "./args.ts";
+import { completeTrunkArguments } from "./completions.ts";
 import {
 	addWorktree,
 	discoverRepository,
@@ -215,13 +216,7 @@ export default function trunk(pi: ExtensionAPI): void {
 
 	pi.registerCommand("trunk", {
 		description: "Git worktrees: list, add, remove, and cd without losing the current conversation",
-		getArgumentCompletions: prefix => {
-			const [subcommand = "", ...rest] = prefix.trimStart().split(/\s+/);
-			if (rest.length !== 0) return null;
-			return Object.entries(SUBCOMMANDS)
-				.filter(([name]) => name.startsWith(subcommand) && name !== subcommand)
-				.map(([name, description]) => ({ value: `${name} `, label: name, description }));
-		},
+		getArgumentCompletions: prefix => completeTrunkArguments(prefix, process.cwd()),
 		handler: async (args, ctx) => {
 			try {
 				const command = parseArgs(args);

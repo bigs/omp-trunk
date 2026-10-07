@@ -31,7 +31,12 @@ export type TrunkCommand =
 	| { op: "remove"; target: string }
 	| { op: "add"; branch: string; createBranch: boolean; revision?: string; cd: boolean };
 
-function tokenize(input: string): string[] {
+interface TokenizedInput {
+	tokens: string[];
+	trailingSeparator: boolean;
+}
+
+function tokenize(input: string, allowIncomplete = false): TokenizedInput {
 	if (input.includes("\0")) throw new TrunkError("Command arguments cannot contain NUL characters.");
 	const tokens: string[] = [];
 	let token = "";
@@ -40,7 +45,11 @@ function tokenize(input: string): string[] {
 	for (let i = 0; i < input.length; i++) {
 		const char = input[i]!;
 		if (char === "\\" && quote !== "'") {
-			if (i + 1 === input.length) throw new TrunkError("Incomplete escape at the end of the command.");
+			if (i + 1 === input.length) {
+				if (!allowIncomplete) throw new TrunkError("Incomplete escape at the end of the command.");
+				started = true;
+				break;
+			}
 			token += input[++i]!;
 			started = true;
 		} else if (quote) {
@@ -58,13 +67,28 @@ function tokenize(input: string): string[] {
 			started = true;
 		}
 	}
-	if (quote) throw new TrunkError("Unclosed quote in command arguments.");
+	if (quote && !allowIncomplete) throw new TrunkError("Unclosed quote in command arguments.");
 	if (started) tokens.push(token);
-	return tokens;
+	return { tokens, trailingSeparator: !started && /\s$/u.test(input) };
+}
+
+export interface CompletionPrefix {
+	subcommand: string;
+	targetPrefix?: string;
+}
+
+export function parseCompletionPrefix(input: string): CompletionPrefix | undefined {
+	const { tokens, trailingSeparator } = tokenize(input, true);
+	if (tokens.length > 2 || (tokens.length === 2 && trailingSeparator)) return undefined;
+	const [subcommand = "", targetPrefix] = tokens;
+	return {
+		subcommand,
+		...(tokens.length === 2 || trailingSeparator ? { targetPrefix: targetPrefix ?? "" } : {}),
+	};
 }
 
 export function parseArgs(args: string): TrunkCommand {
-	const [op = "help", ...tokens] = tokenize(args);
+	const [op = "help", ...tokens] = tokenize(args).tokens;
 	if (!Object.hasOwn(SUBCOMMANDS, op)) throw new TrunkError(`Unknown /trunk command: ${JSON.stringify(op)}. Use /trunk help.`);
 	let createBranch = false;
 	let cd = true;

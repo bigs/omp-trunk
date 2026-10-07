@@ -40,6 +40,10 @@ Install/link the plugin on the machine where OMP runs. With a remote Tern sessio
 
 Flags may appear before or after the positional arguments. Quote paths containing spaces.
 
+`/trunk cd ` and `/trunk remove ` offer Tab completion from the repository's live registered worktrees. Suggestions prefer branch names, include `@` for the primary checkout with `cd`, and use absolute paths for detached or ambiguous targets. Paths and branch names needing quotes are inserted with the command parser's escaping rules; partially quoted input is supported. Exact, complete matches stop suggesting themselves so Enter submits normally.
+
+`remove` suggestions omit the primary, current, locked, and unavailable checkouts. Completion does not check for dirty files; Git's removal safeguards still apply. Suggestions follow the current directory after navigation and include worktrees created by other tools.
+
 ### Create and enter
 
 ```text
@@ -170,3 +174,5 @@ Regression tests use isolated real Git repositories. They cover source revisions
 Runtime verification exercised OMP 18.7 RPC navigation: actual process/session cwd, conversation retention, destination context refresh, system-priority notification, and removal safeguards. A native ANSI TUI smoke also exercised `add`, automatic navigation, `cd @`, and removal while preserving session identity. Temporary instrumentation used a local probe model and aborted policy capture before provider dispatch; no model request was needed.
 
 Hook runtime verification exercised the actual OMP 18.7 RPC CLI with both config filenames: ordered copy/symlink/command setup, `--no-cd`, native navigation after setup, retained session identity, visible hook output without corrupting RPC framing, and failed setup from a linked checkout leaving the new worktree registered without navigating. No model request was made.
+
+Completion runtime verification exercised the actual OMP 18.7 ANSI TUI: visible `cd` and `remove` target menus, Tab insertion, one-Enter submission after an exact completion, native navigation, removal from the destination checkout, and disappearance of removed worktrees from subsequent suggestions. Regression tests also cover detached/quoted paths, ambiguous selectors, incomplete quotes, current/locked/unavailable filtering, and live Git state.
